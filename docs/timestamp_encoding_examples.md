@@ -123,6 +123,140 @@ inputs = processor(
 }
 ```
 
+### inputs 对象结构示例（processor 输出）
+
+调用 `processor()` 后返回的 `inputs` 对象是一个 `BatchEncoding` 类型，包含以下键值：
+
+```python
+# inputs 对象的结构（假设视频有 120 帧，序列长度为 8000）
+inputs = {
+    "input_ids": torch.Tensor,           # 形状: [batch_size, seq_len], 例如 [1, 8000]
+    "attention_mask": torch.Tensor,      # 形状: [batch_size, seq_len], 例如 [1, 8000]
+    "pixel_values_videos": torch.Tensor, # 形状: [batch_size, num_frames, channels, height, width]
+                                         # 例如 [1, 120, 3, 224, 224]
+    "video_grid_thw": torch.Tensor,      # 视频网格信息 [temporal, height, width]
+}
+```
+
+**详细示例**（假设一个 60 秒视频，采样率 2 fps）：
+
+```python
+print(f"inputs 类型: {type(inputs)}")
+# 输出: inputs 类型: <class 'transformers.tokenization_utils_base.BatchEncoding'>
+
+print(f"inputs 包含的键: {inputs.keys()}")
+# 输出: inputs 包含的键: dict_keys(['input_ids', 'attention_mask', 'pixel_values_videos', 'video_grid_thw'])
+
+print(f"input_ids 形状: {inputs['input_ids'].shape}")
+# 输出: input_ids 形状: torch.Size([1, 8256])
+
+print(f"attention_mask 形状: {inputs['attention_mask'].shape}")
+# 输出: attention_mask 形状: torch.Size([1, 8256])
+
+print(f"pixel_values_videos 形状: {inputs['pixel_values_videos'].shape}")
+# 输出: pixel_values_videos 形状: torch.Size([1, 120, 3, 224, 224])
+# 解释: [batch_size=1, num_frames=120, channels=3, height=224, width=224]
+
+print(f"video_grid_thw 形状: {inputs['video_grid_thw'].shape}")
+# 输出: video_grid_thw 形状: torch.Size([1, 3])
+# 解释: 每个视频的 [temporal_patches, height_patches, width_patches]
+
+# 查看 input_ids 的部分内容（包含特殊标记）
+print(f"input_ids 前 50 个 token: {inputs['input_ids'][0, :50].tolist()}")
+# 输出示例: [151643, 151644, 8948, 198, 2610, 525, 264, ...]
+# 这些是 tokenized 的文本，包含系统提示和用户输入
+```
+
+**完整的 inputs 对象使用示例**：
+
+```python
+from transformers import AutoModelForImageTextToText, AutoProcessor
+from qwen_vl_utils import process_vision_info
+
+# 加载模型和处理器
+model = AutoModelForImageTextToText.from_pretrained("TencentARC/TimeLens-8B")
+processor = AutoProcessor.from_pretrained("TencentARC/TimeLens-8B")
+
+# 构建 messages
+messages = [
+    {
+        "role": "user",
+        "content": [
+            {
+                "type": "video",
+                "video": "/path/to/video.mp4",
+                "min_pixels": 64 * 28 * 28,
+                "total_pixels": 14336 * 28 * 28,
+                "fps": 2
+            },
+            {
+                "type": "text",
+                "text": "Please find the visual event described by the sentence 'a person opens a door'..."
+            }
+        ]
+    }
+]
+
+# 应用聊天模板
+text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+
+# 处理视觉信息
+images, videos, video_kwargs = process_vision_info(
+    messages,
+    image_patch_size=16,
+    return_video_kwargs=True,
+    return_video_metadata=True,
+)
+
+# 解包视频和元数据
+videos, video_metadatas = zip(*videos)
+videos, video_metadatas = list(videos), list(video_metadatas)
+
+# 调用 processor 获取 inputs
+inputs = processor(
+    text=[text],
+    images=images,
+    videos=videos,
+    video_metadata=video_metadatas,
+    padding=True,
+    return_tensors="pt",
+    **video_kwargs,
+)
+
+# 打印 inputs 结构
+print("=" * 50)
+print("inputs 对象详细信息:")
+print("=" * 50)
+for key, value in inputs.items():
+    if hasattr(value, 'shape'):
+        print(f"{key}: shape={value.shape}, dtype={value.dtype}")
+    else:
+        print(f"{key}: {type(value)}")
+
+# 输出示例:
+# ==================================================
+# inputs 对象详细信息:
+# ==================================================
+# input_ids: shape=torch.Size([1, 8256]), dtype=torch.int64
+# attention_mask: shape=torch.Size([1, 8256]), dtype=torch.int64
+# pixel_values_videos: shape=torch.Size([1, 120, 3, 224, 224]), dtype=torch.float32
+# video_grid_thw: shape=torch.Size([1, 3]), dtype=torch.int64
+
+# 将 inputs 移动到 GPU 并进行推理
+inputs = inputs.to("cuda")
+output_ids = model.generate(
+    **inputs,
+    do_sample=False,
+    max_new_tokens=512,
+)
+
+# 解码输出
+generated_ids_trimmed = output_ids[0, inputs.input_ids.shape[1]:]
+answer = processor.decode(generated_ids_trimmed, skip_special_tokens=True)
+print(f"模型输出: {answer}")
+# 输出示例: 模型输出: The event happens in 0.0 - 5.0 seconds.
+```
+
 ## 4. Qwen2.5-VL 原始模型（无时间戳增强）
 
 ### 特点
